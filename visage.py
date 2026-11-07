@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import sys
 import time
 import urllib.request
@@ -52,6 +53,12 @@ URLS = {
     "emotions": ("emotion-ferplus-8.onnx",
                  "https://media.githubusercontent.com/media/onnx/models/main/validated/vision/"
                  "body_analysis/emotion_ferplus/model/emotion-ferplus-8.onnx"),
+    # anti-fraude : distingue un vrai visage d'une photo ou d'un écran (Silent-Face / MiniVision)
+    "antifraude": ("MiniFASNetV2.onnx",
+                   "https://github.com/yakhyo/face-anti-spoofing/releases/download/weights/MiniFASNetV2.onnx"),
+}
+EMPREINTES_SHA256 = {
+    "MiniFASNetV2.onnx": "b32929adc2d9c34b9486f8c4c7bc97c1b69bc0ea9befefc380e4faae4e463907",
 }
 
 # Ordre des sorties du modèle FER+
@@ -140,8 +147,9 @@ def chemin_modele(cle: str) -> Path:
         tmp.unlink(missing_ok=True)
         sys.exit(f"\nImpossible de télécharger {url}\n  ({e})\n"
                  f"Téléchargez-le à la main et placez-le dans {MODELES}/")
-    if tmp.stat().st_size < 100_000:  # pointeur Git LFS ou page d'erreur
-        tmp.unlink()
+    attendu = EMPREINTES_SHA256.get(nom)
+    if tmp.stat().st_size < 100_000 or (attendu and hashlib.sha256(tmp.read_bytes()).hexdigest() != attendu):
+        tmp.unlink()  # pointeur Git LFS, page d'erreur ou fichier modifié
         sys.exit(f"Fichier reçu invalide pour {nom}. Téléchargez-le à la main :\n  {url}")
     tmp.replace(chemin)
     return chemin
@@ -152,27 +160,33 @@ class Visage:
     boite: tuple[int, int, int, int]
     nom: str
     similarite: float
-    probas: np.ndarray
+    probas: np.ndarray | None = None   # émotions (None si désactivées)
+    vivant: float | None = None        # probabilité d'un vrai visage (None si anti-fraude désactivée)
     piste: int = -1
 
     @property
     def emotion(self) -> str:
-        return EMOTIONS[int(np.argmax(self.probas))]
+        return "" if self.probas is None else EMOTIONS[int(np.argmax(self.probas))]
 
     @property
     def confiance(self) -> float:
-        return float(np.max(self.probas))
+        return 0.0 if self.probas is None else float(np.max(self.probas))
 
 
 class Analyseur:
-    def __init__(self, seuil: float = SEUIL_RECONNAISSANCE, seuil_detection: float = 0.8):
+    def __init__(self, seuil: float = SEUIL_RECONNAISSANCE, seuil_detection: float = 0.8,
+                 emotions: bool = True, antifraude: bool = False):
         self.seuil = seuil
         self.seuil_detection = seuil_detection
         self.detecteur = cv2.FaceDetectorYN.create(
             str(chemin_modele("detecteur")), "", (320, 320),
             min(seuil_detection, SEUIL_PRECIS), 0.3, 5000)
         self.reco = cv2.FaceRecognizerSF.create(str(chemin_modele("reconnaissance")), "")
-        self.emo = cv2.dnn.readNetFromONNX(str(chemin_modele("emotions")))
+        self.emo = cv2.dnn.readNetFromONNX(str(chemin_modele("emotions"))) if emotions else None
+        self.fas = cv2.dnn.readNetFromONNX(str(chemin_modele("antifraude"))) if antifraude else None
+        self.connus = charger_visages()
+
+    def recharger_visages(self):
         self.connus = charger_visages()
 
     def _detecter_echelle(self, image, echelle: float):
@@ -210,6 +224,20 @@ class Analyseur:
         self.emo.setInput(gris.reshape(1, 1, 64, 64))
         return softmax(self.emo.forward().flatten())
 
+    def probabilite_vivant(self, image, boite, echelle: float = 2.7) -> float:
+        """Probabilité que le visage soit réel (et non une photo, un écran ou une vidéo)."""
+        hi, wi = image.shape[:2]
+        x, y, w, h = boite
+        if w <= 0 or h <= 0:
+            return 0.0
+        s = min((hi - 1) / h, (wi - 1) / w, echelle)
+        cx, cy, nw, nh = x + w / 2, y + h / 2, w * s, h * s
+        x1, y1 = max(0, int(cx - nw / 2)), max(0, int(cy - nh / 2))
+        x2, y2 = min(wi - 1, int(cx + nw / 2)), min(hi - 1, int(cy + nh / 2))
+        zone = cv2.resize(image[y1:y2 + 1, x1:x2 + 1], (80, 80)).astype(np.float32)
+        self.fas.setInput(zone.transpose(2, 0, 1)[None])
+        return float(softmax(self.fas.forward().flatten())[1])  # classe 1 = vrai visage
+
     def analyser(self, image, precis: bool = False) -> list[Visage]:
         resultats = []
         for v in self.detecter(image, precis):
@@ -219,7 +247,10 @@ class Analyseur:
                 nom, sim = "Inconnu", 0.0  # trop petit pour identifier de façon fiable
             else:
                 nom, sim = identifier(emp, self.connus, self.seuil)
-            resultats.append(Visage(boite, nom, sim, self.probas_emotions(aligne)))
+            resultats.append(Visage(
+                boite, nom, sim,
+                probas=self.probas_emotions(aligne) if self.emo is not None else None,
+                vivant=self.probabilite_vivant(image, boite) if self.fas is not None else None))
         return resultats
 
 
@@ -228,7 +259,7 @@ class Analyseur:
 class Piste:
     id: int
     boite: tuple
-    probas: np.ndarray
+    probas: np.ndarray | None
     votes: Counter = field(default_factory=Counter)
     vue: float = 0.0
 
@@ -251,14 +282,15 @@ class Suivi:
                 if s >= score:
                     meilleure, score = pid, s
             if meilleure is None:
-                p = Piste(self._prochain, v.boite, v.probas.copy())
+                p = Piste(self._prochain, v.boite, None if v.probas is None else v.probas.copy())
                 self.pistes[p.id] = p
                 self._prochain += 1
             else:
                 p = self.pistes[meilleure]
                 libres.discard(meilleure)
                 p.boite = v.boite
-                p.probas = self.lissage * p.probas + (1 - self.lissage) * v.probas
+                if v.probas is not None and p.probas is not None:
+                    p.probas = self.lissage * p.probas + (1 - self.lissage) * v.probas
             p.vue = maintenant
             p.votes[v.nom] += 1
             # le nom affiché = le plus souvent reconnu, en préférant un nom connu
@@ -296,7 +328,7 @@ def dessiner(image, visages: list[Visage], fps: float | None = None):
         x, y, w, h = v.boite
         couleur = COULEURS.get(v.emotion, (255, 255, 255))
         cv2.rectangle(image, (x, y), (x + w, y + h), couleur, 2)
-        texte = f"{v.nom} - {v.emotion} {int(v.confiance * 100)}%"
+        texte = v.nom if v.probas is None else f"{v.nom} - {v.emotion} {int(v.confiance * 100)}%"
         (tw, th), _ = cv2.getTextSize(texte, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
         y_txt = max(y - 8, th + 8)
         cv2.rectangle(image, (x, y_txt - th - 6), (x + tw + 6, y_txt + 4), couleur, -1)
@@ -317,7 +349,7 @@ def ouvrir_source(camera: int, video: str | None):
 
 # =========================================================================== commandes
 def cmd_enregistrer(args):
-    a = Analyseur()
+    a = Analyseur(emotions=False)
     empreintes: list[np.ndarray] = []
 
     def accepter(image, visage, origine="") -> str | None:

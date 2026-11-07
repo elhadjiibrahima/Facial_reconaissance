@@ -11,3 +11,8 @@ capture_*.jpg
 *_analyse.jpg
 *_analyse.mp4
 humeurs*.csv
+
+# pointage : base et photos des employés (données personnelles)
+pointage.db*
+photos_pointage/
+*.csv
