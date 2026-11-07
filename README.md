@@ -7,7 +7,7 @@ Le programme reconnaît les personnes enregistrées et affiche l'humeur de chaqu
 
 ## Fonctionnalités
 
-- Détection de plusieurs visages à la fois (YuNet)
+- Détection de plusieurs visages à la fois (YuNet), y compris les petits visages au fond d'une photo
 - Reconnaissance des personnes enregistrées (SFace, similarité cosinus)
 - 8 émotions (FER+), lissées dans le temps pour éviter que l'affichage clignote
 - Suivi des visages d'une image à l'autre : le nom reste stable même si une image est ratée
@@ -48,7 +48,7 @@ python visage.py lancer --video reunion.mp4 --sortie reunion_analyse.mp4
 python visage.py lancer --journal humeurs.csv
 python visage.py rapport humeurs.csv
 
-# Analyser une photo (crée photo_analyse.jpg)
+# Analyser une photo (crée photo_analyse.jpg ; --rapide pour ignorer les petits visages)
 python visage.py photo photo.jpg
 
 # Gérer les personnes
@@ -64,6 +64,7 @@ python visage.py supprimer Awa
 | `--sauter 1` | analyser une image sur deux (PC lent) |
 | `--largeur 640` | réduire l'image pour aller plus vite |
 | `--seuil 0.4` | reconnaissance plus stricte (moins d'erreurs, plus d'« Inconnu ») |
+| `--precis` | trouver aussi les petits visages lointains (plus lent) |
 | `--sans-fenetre` | sans affichage, avec `--sortie` ou `--journal` |
 
 ## Conseils pour de bons résultats

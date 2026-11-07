@@ -42,14 +42,15 @@ DOSSIER = Path(__file__).resolve().parent
 MODELES = DOSSIER / "modeles"
 VISAGES = DOSSIER / "visages_connus"
 
-ZOO = "https://github.com/opencv/opencv_zoo/raw/main/models"
+# Les modèles sont stockés avec Git LFS : on passe directement par media.githubusercontent.com
+ZOO = "https://media.githubusercontent.com/media/opencv/opencv_zoo/main/models"
 URLS = {
     "detecteur": ("face_detection_yunet_2023mar.onnx",
                   f"{ZOO}/face_detection_yunet/face_detection_yunet_2023mar.onnx"),
     "reconnaissance": ("face_recognition_sface_2021dec.onnx",
                        f"{ZOO}/face_recognition_sface/face_recognition_sface_2021dec.onnx"),
     "emotions": ("emotion-ferplus-8.onnx",
-                 "https://github.com/onnx/models/raw/main/validated/vision/"
+                 "https://media.githubusercontent.com/media/onnx/models/main/validated/vision/"
                  "body_analysis/emotion_ferplus/model/emotion-ferplus-8.onnx"),
 }
 
@@ -61,7 +62,9 @@ COULEURS = {  # BGR
     "Peur": (180, 0, 180), "Mepris": (120, 60, 160),
 }
 SEUIL_RECONNAISSANCE = 0.363  # similarité cosinus recommandée pour SFace
-TAILLE_MIN_VISAGE = 60        # px : en dessous, l'identification n'est pas fiable
+SEUIL_PRECIS = 0.75           # score minimal des visages trouvés sur l'image agrandie
+TAILLE_MIN_VISAGE = 60        # px : taille minimale pour enregistrer une personne
+TAILLE_MIN_IDENTIF = 32       # px : en dessous, on ne tente pas d'identifier
 NETTETE_MIN = 40.0            # variance du laplacien : en dessous, image floue
 
 
@@ -113,14 +116,25 @@ def chemin_modele(cle: str) -> Path:
     MODELES.mkdir(parents=True, exist_ok=True)
     tmp = chemin.with_suffix(".part")
 
+    dernier_pct = [-1]
+
     def progression(blocs, taille_bloc, total):
         if total > 0:
-            pct = min(100, blocs * taille_bloc * 100 // total)
-            print(f"\r  {nom} : {pct}%", end="", flush=True)
+            pct = min(100, blocs * taille_bloc * 100 // total) // 10 * 10
+            if pct != dernier_pct[0]:
+                dernier_pct[0] = pct
+                print(f"\r  {nom} : {pct}%", end="", flush=True)
 
     print(f"Téléchargement du modèle {nom}…")
     try:
-        urllib.request.urlretrieve(url, tmp, progression)
+        requete = urllib.request.Request(url, headers={"User-Agent": f"Facial_reconaissance/{__version__}"})
+        with urllib.request.urlopen(requete, timeout=60) as rep, open(tmp, "wb") as f:
+            total = int(rep.headers.get("Content-Length") or 0)
+            blocs = 0
+            while morceau := rep.read(64 * 1024):
+                f.write(morceau)
+                blocs += 1
+                progression(blocs, 64 * 1024, total)
         print()
     except Exception as e:
         tmp.unlink(missing_ok=True)
@@ -153,17 +167,37 @@ class Visage:
 class Analyseur:
     def __init__(self, seuil: float = SEUIL_RECONNAISSANCE, seuil_detection: float = 0.8):
         self.seuil = seuil
+        self.seuil_detection = seuil_detection
         self.detecteur = cv2.FaceDetectorYN.create(
-            str(chemin_modele("detecteur")), "", (320, 320), seuil_detection, 0.3, 5000)
+            str(chemin_modele("detecteur")), "", (320, 320),
+            min(seuil_detection, SEUIL_PRECIS), 0.3, 5000)
         self.reco = cv2.FaceRecognizerSF.create(str(chemin_modele("reconnaissance")), "")
         self.emo = cv2.dnn.readNetFromONNX(str(chemin_modele("emotions")))
         self.connus = charger_visages()
 
-    def detecter(self, image):
-        h, w = image.shape[:2]
+    def _detecter_echelle(self, image, echelle: float):
+        img = image if echelle == 1 else cv2.resize(image, None, fx=echelle, fy=echelle)
+        h, w = img.shape[:2]
         self.detecteur.setInputSize((w, h))
-        _, visages = self.detecteur.detect(image)
-        return [] if visages is None else list(visages)
+        _, visages = self.detecteur.detect(img)
+        if visages is None:
+            return []
+        visages = visages.copy()
+        visages[:, :14] /= echelle  # boîte + 5 points du visage, ramenés à l'image d'origine
+        return list(visages)
+
+    def detecter(self, image, precis: bool = False):
+        """precis=True : cherche aussi sur l'image agrandie x2 pour trouver les petits visages
+        (personnes au fond d'une photo). Plus lent : à utiliser surtout sur les photos."""
+        visages = [v for v in self._detecter_echelle(image, 1.0) if v[14] >= self.seuil_detection]
+        if precis and max(image.shape[:2]) * 2 <= 4000:
+            visages += [v for v in self._detecter_echelle(image, 2.0) if v[14] >= SEUIL_PRECIS]
+            if len(visages) > 1:
+                boites = [[float(x) for x in v[:4]] for v in visages]
+                scores = [float(v[14]) for v in visages]
+                garder = cv2.dnn.NMSBoxes(boites, scores, 0.0, 0.3)
+                visages = [visages[i] for i in np.array(garder).flatten()]
+        return visages
 
     def empreinte(self, image, visage):
         aligne = self.reco.alignCrop(image, visage)  # visage recadré et redressé, 112x112
@@ -176,12 +210,12 @@ class Analyseur:
         self.emo.setInput(gris.reshape(1, 1, 64, 64))
         return softmax(self.emo.forward().flatten())
 
-    def analyser(self, image) -> list[Visage]:
+    def analyser(self, image, precis: bool = False) -> list[Visage]:
         resultats = []
-        for v in self.detecter(image):
+        for v in self.detecter(image, precis):
             boite = tuple(int(x) for x in v[:4])
             emp, aligne = self.empreinte(image, v)
-            if min(boite[2], boite[3]) < TAILLE_MIN_VISAGE:
+            if min(boite[2], boite[3]) < TAILLE_MIN_IDENTIF:
                 nom, sim = "Inconnu", 0.0  # trop petit pour identifier de façon fiable
             else:
                 nom, sim = identifier(emp, self.connus, self.seuil)
@@ -375,7 +409,7 @@ def cmd_lancer(args):
                 r = args.largeur / frame.shape[1]
                 frame = cv2.resize(frame, None, fx=r, fy=r)
             if n % (args.sauter + 1) == 0:
-                resultats = suivi.mettre_a_jour(a.analyser(frame))
+                resultats = suivi.mettre_a_jour(a.analyser(frame, args.precis))
             n += 1
             maintenant = time.time()
             fps = 0.9 * fps + 0.1 * (1 / max(maintenant - t_prec, 1e-6))
@@ -424,13 +458,14 @@ def cmd_photo(args):
     img = cv2.imread(args.image)
     if img is None:
         sys.exit(f"Image illisible : {args.image}")
-    resultats = a.analyser(img)
+    resultats = a.analyser(img, precis=not args.rapide)
     if not resultats:
         print("Aucun visage détecté.")
     for i, v in enumerate(resultats, 1):
         details = ", ".join(f"{e} {p * 100:.0f}%" for e, p in
                             sorted(zip(EMOTIONS, v.probas), key=lambda t: -t[1])[:3])
-        print(f"Visage {i} : {v.nom} (similarité {v.similarite:.2f}) — {details}")
+        qui = v.nom if v.nom == "Inconnu" else f"{v.nom} (ressemblance {v.similarite:.2f})"
+        print(f"Visage {i} : {qui} — {details}")
     sortie = args.sortie or str(Path(args.image).with_name(Path(args.image).stem + "_analyse.jpg"))
     cv2.imwrite(sortie, dessiner(img, resultats))
     print(f"Image annotée : {sortie}")
@@ -495,12 +530,14 @@ def construire_parseur() -> argparse.ArgumentParser:
     l.add_argument("--largeur", type=int, default=960, help="réduit l'image à cette largeur pour aller plus vite (960, 0 = non)")
     l.add_argument("--sauter", type=int, default=0, help="n'analyser qu'une image sur N+1 (PC lent : 1 ou 2)")
     l.add_argument("--seuil", type=float, default=SEUIL_RECONNAISSANCE, help="seuil de reconnaissance (0.363)")
+    l.add_argument("--precis", action="store_true", help="trouver aussi les petits visages lointains (plus lent)")
     l.add_argument("--sans-fenetre", action="store_true", help="ne pas afficher de fenêtre (avec --sortie ou --journal)")
     l.set_defaults(func=cmd_lancer)
 
     ph = sp.add_parser("photo", help="analyser une photo")
     ph.add_argument("image")
     ph.add_argument("--sortie")
+    ph.add_argument("--rapide", action="store_true", help="ne pas chercher les petits visages au fond")
     ph.add_argument("--seuil", type=float, default=SEUIL_RECONNAISSANCE)
     ph.set_defaults(func=cmd_photo)
 
