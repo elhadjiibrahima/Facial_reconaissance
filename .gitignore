@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+
+# modèles téléchargés et données personnelles
+modeles/
+visages_connus/
+capture_*.jpg
+*_analyse.jpg
+*_analyse.mp4
+humeurs*.csv
