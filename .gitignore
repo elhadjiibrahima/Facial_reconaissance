@@ -16,3 +16,6 @@ humeurs*.csv
 pointage.db*
 photos_pointage/
 *.csv
+
+# logs
+facial.log
