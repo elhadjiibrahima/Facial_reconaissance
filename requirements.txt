@@ -1,3 +1,6 @@
-opencv-python>=4.8
-numpy>=1.21
-Pillow>=9.0
+opencv-python>=4.8.0
+numpy>=1.21.0
+Pillow>=9.0.0
+
+# développement / tests
+pytest>=7.0

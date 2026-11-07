@@ -1,13 +1,15 @@
 # Facial_reconaissance
 
+[![Tests](https://github.com/elhadjiibrahima/Facial_reconaissance/actions/workflows/tests.yml/badge.svg)](https://github.com/elhadjiibrahima/Facial_reconaissance/actions/workflows/tests.yml)
+[![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue.svg)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 Reconnaissance faciale et détection des émotions en Python, en direct avec la webcam, sur une vidéo ou sur une photo.
 
 Deux outils :
 
-- **`pointage.py`** : pointage des employés par reconnaissance faciale (arrivées, départs, retards,
-  absences, rapports Excel), avec anti-fraude contre les photos et les écrans.
-- **`visage.py`** : reconnaissance des personnes et détection des émotions
-  (neutre, joie, surprise, tristesse, colère, dégoût, peur, mépris).
+- **`pointage.py`** : pointage des employés par reconnaissance faciale (arrivées, départs, retards, absences, rapports Excel), avec anti-fraude contre les photos et les écrans.
+- **`visage.py`** : reconnaissance des personnes et détection des émotions (neutre, joie, surprise, tristesse, colère, dégoût, peur, mépris).
 
 ## Fonctionnalités
 
@@ -19,6 +21,8 @@ Deux outils :
 - Webcam, fichier vidéo (avec export de la vidéo annotée) ou photo
 - Journal CSV des humeurs et rapport par personne
 - Fonctionne hors ligne une fois les modèles téléchargés, sans GPU
+- **Anti-fraude** (MiniFASNet) contre les photos et écrans
+- Base SQLite avec traçabilité complète des pointages et corrections
 
 ## Installation
 
@@ -27,7 +31,15 @@ Python 3.9 ou plus récent.
 ```bash
 git clone https://github.com/elhadjiibrahima/Facial_reconaissance.git
 cd Facial_reconaissance
+
+# Environnement virtuel recommandé
+python -m venv .venv
+source .venv/bin/activate          # Linux / macOS
+# .venv\Scripts\activate           # Windows
+
 pip install -r requirements.txt
+# ou pour le développement :
+# pip install -e ".[dev]"
 ```
 
 Les modèles (environ 75 Mo) se téléchargent tout seuls au premier lancement, dans `modeles/`.
@@ -172,6 +184,8 @@ pip install pytest
 python -m pytest
 ```
 
+Un workflow GitHub Actions lance automatiquement les tests sur Python 3.10, 3.11 et 3.12.
+
 ## Vie privée
 
 Les empreintes des visages (`visages_connus/`), la base de pointage (`pointage.db`) et les photos
@@ -184,3 +198,7 @@ Demandez l'accord des personnes avant d'enregistrer leur visage.
   [SFace](https://github.com/opencv/opencv_zoo/tree/main/models/face_recognition_sface) — OpenCV Zoo
 - [FER+](https://github.com/onnx/models/tree/main/validated/vision/body_analysis/emotion_ferplus) — ONNX Model Zoo
 - [MiniFASNetV2](https://github.com/yakhyo/face-anti-spoofing) (anti-fraude, d'après Silent-Face-Anti-Spoofing de MiniVision)
+
+## Licence
+
+MIT — voir le fichier [LICENSE](LICENSE).
